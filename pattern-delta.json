@@ -1,0 +1,72 @@
+{
+  "format": "aihelper-stage5-line-delta-v1",
+  "baseline_sha256": "6c6f968054f7a08d83a4011f862189ee79402fc219a2b79f5d6e48f8beebfce5",
+  "target_sha256": "a8ca1e9152b8cc36fc9271559382075a11d0829375b9bb10ebad4698bf05863e",
+  "edits": [
+    {
+      "start": 29,
+      "delete": 0,
+      "insert": "PATTERN_TURN_INTERVAL_SECONDS = 60\nPATTERN_PRIORITY_BURST = 8\n"
+    },
+    {
+      "start": 330,
+      "delete": 0,
+      "insert": "def process_pattern_scan(runner, lane):\n    \"\"\"Use the governed pattern job path without replacing the live-call loop.\"\"\"\n    policy = runner._policy()\n    lane.enabled = policy.active and policy.valid and policy.allows(\"patterns\")\n    if not lane.enabled:\n        lane.discovery = \"disabled_or_policy_hold\"\n        lane.discovery_error_code = None\n        lane.last_result = \"disabled_or_policy_hold\"\n        return False\n\n    from ai_worker.patterns import discover\n    summary = {}\n    try:\n        runner.discover_if_due(\"pattern_review\", lambda: discover(runner), summary)\n        lane.discovery_error_code = None\n    except AIError as error:\n        # Candidate discovery and an already leased/pending job are separate.\n        # Keep the latter moving through the gateway's fresh policy fence.\n        summary[\"pattern_discovery\"] = \"error\"\n        lane.discovery_error_code = error.code\n    lane.discovery = summary.get(\"pattern_discovery\", \"unavailable\")\n    jobs = runner.bridge.claim_jobs([\"pattern_review\"])\n    if not jobs:\n        lane.last_result = \"discovery_error\" if lane.discovery_error_code else \"no_pattern_job\"\n        return False\n\n    # A heartbeat transport failure must not abandon an already claimed lease.\n    try:\n        runner.heartbeat(\"working\", details={\"mode\": \"pattern_review\", \"pattern_discovery\": lane.discovery})\n    except AIError as error:\n        print(\"Pattern heartbeat deferred: \" + safe_error(error), flush=True)\n    runner.process_claimed(jobs[0], None, summary)\n    lane.last_result = summary.get(\"status\", \"processed\")\n    if lane.last_result == \"pattern_scan_saved\":\n        runner.last_success = datetime.now(timezone.utc).isoformat()\n    print(json.dumps({key: summary[key] for key in (\"status\", \"pattern_accounts_scanned\", \"pattern_draft_flags\")\n                      if key in summary}), flush=True)\n    return True\n\n\nclass PatternLane:\n    \"\"\"Give one scan a turn after bounded live work, or before older backlog.\"\"\"\n\n    def __init__(self):\n        self.priority_jobs = 0\n        self.next_at = 0.0\n        self.enabled = None\n        self.discovery = \"not_checked\"\n        self.discovery_error_code = None\n        self.last_result = \"not_checked\"\n\n    def after_priority(self, runner):\n        self.priority_jobs = min(PATTERN_PRIORITY_BURST, self.priority_jobs + 1)\n        return self._turn(runner, idle=False)\n\n    def during_idle(self, runner):\n        return self._turn(runner, idle=True)\n\n    def _turn(self, runner, *, idle):\n        now = monotonic()\n        if now < self.next_at or not idle and self.priority_jobs < PATTERN_PRIORITY_BURST:\n            return False\n        # One scan follows eight completed priority jobs, including booked QA.\n        self.priority_jobs = 0\n        try:\n            return process_pattern_scan(runner, self)\n        except AIError:\n            self.last_result = \"error\"\n            raise\n        finally:\n            self.next_at = monotonic() + PATTERN_TURN_INTERVAL_SECONDS\n\n    def details(self):\n        return {\"pattern_pipeline_enabled\": self.enabled, \"pattern_discovery\": self.discovery,\n                \"pattern_discovery_error_code\": self.discovery_error_code,\n                \"pattern_last_result\": self.last_result}\n\n\n"
+    },
+    {
+      "start": 348,
+      "delete": 0,
+      "insert": "            pattern_lane = PatternLane()\n"
+    },
+    {
+      "start": 362,
+      "delete": 0,
+      "insert": "                        pattern_lane.after_priority(runner)\n"
+    },
+    {
+      "start": 367,
+      "delete": 0,
+      "insert": "                            pattern_lane.after_priority(runner)\n"
+    },
+    {
+      "start": 369,
+      "delete": 0,
+      "insert": "                        pattern_lane.after_priority(runner)\n"
+    },
+    {
+      "start": 376,
+      "delete": 1,
+      "insert": "                            runner.heartbeat(\"working\", details={\"mode\":\"shift_transcription\", **pattern_lane.details()})\n"
+    },
+    {
+      "start": 384,
+      "delete": 0,
+      "insert": "                                pattern_lane.after_priority(runner)\n"
+    },
+    {
+      "start": 387,
+      "delete": 0,
+      "insert": "                        pattern_lane.after_priority(runner)\n"
+    },
+    {
+      "start": 393,
+      "delete": 0,
+      "insert": "                        pattern_lane.after_priority(runner)\n                        continue\n                    if pattern_lane.during_idle(runner):\n"
+    },
+    {
+      "start": 397,
+      "delete": 1,
+      "insert": "                    runner.heartbeat(\"degraded\" if pattern_lane.discovery_error_code else \"ok\",\n                                     error=pattern_lane.discovery_error_code, details={\n"
+    },
+    {
+      "start": 401,
+      "delete": 0,
+      "insert": "                        **pattern_lane.details(),\n"
+    },
+    {
+      "start": 403,
+      "delete": 1,
+      "insert": "                    runner.heartbeat(\"degraded\", error=safe_error(error),\n                                     details={\"mode\":\"waiting_to_retry\", **pattern_lane.details()})\n"
+    }
+  ]
+}
